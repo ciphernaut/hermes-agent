@@ -17225,6 +17225,14 @@ class GatewayRunner:
                 cmd = approval_data.get("command", "")
                 desc = approval_data.get("description", "dangerous command")
 
+                # Pass the triggering user ID through metadata so the
+                # adapter can auto-deny if they're not authorised to
+                # approve dangerous commands.
+                _approval_metadata = dict(_status_thread_metadata or {})
+                _sid = approval_data.get("source_user_id", "")
+                if _sid:
+                    _approval_metadata["source_user_id"] = _sid
+
                 # Prefer button-based approval when the adapter supports it.
                 # Check the *class* for the method, not the instance — avoids
                 # false positives from MagicMock auto-attribute creation in tests.
@@ -17236,7 +17244,7 @@ class GatewayRunner:
                                 command=cmd,
                                 session_key=_approval_session_key,
                                 description=desc,
-                                metadata=_status_thread_metadata,
+                                metadata=_approval_metadata,
                             ),
                             _loop_for_step,
                             logger=logger,

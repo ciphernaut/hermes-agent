@@ -581,7 +581,8 @@ class DiscordAdapter(BasePlatformAdapter):
         super().__init__(config, Platform.DISCORD)
         self._client: Optional[commands.Bot] = None
         self._ready_event = asyncio.Event()
-        self._allowed_user_ids: set = set()  # For button approval authorization
+        self._allowed_user_ids: set = set()  # Who can chat with the bot
+        self._approval_allowed_user_ids: set = set()  # Who can approve security-flagged commands (subset or same as above)
         self._allowed_role_ids: set = set()  # For DISCORD_ALLOWED_ROLES filtering
         self.gateway_runner = None  # Set by gateway/run.py for cross-platform delivery
         # Voice channel state (per-guild)
@@ -683,6 +684,18 @@ class DiscordAdapter(BasePlatformAdapter):
                     int(rid.strip()) for rid in roles_env.split(",")
                     if rid.strip().isdigit()
                 }
+
+            # Parse DISCORD_APPROVAL_ALLOWED_USERS — subset of users who can
+            # approve security-flagged (dangerous) commands.
+            approval_env = os.getenv("DISCORD_APPROVAL_ALLOWED_USERS", "")
+            if approval_env:
+                self._approval_allowed_user_ids = {
+                    _clean_discord_id(uid) for uid in approval_env.split(",")
+                    if uid.strip()
+                }
+            else:
+                # Fall back to the main allowlist for backward compat
+                self._approval_allowed_user_ids = set(self._allowed_user_ids)
 
             # Set up intents.
             # Message Content is required for normal text replies.
@@ -4070,10 +4083,44 @@ class DiscordAdapter(BasePlatformAdapter):
 
         The buttons call ``resolve_gateway_approval()`` to unblock the waiting
         agent thread — this replaces the text-based ``/approve`` flow on Discord.
+
+        If the user who triggered the command isn't in the approval allowlist
+        (``_approval_allowed_user_ids``), the command is auto-denied immediately
+        and a text explanation is sent instead — no clickable buttons.
         """
         if not self._client or not DISCORD_AVAILABLE:
             return SendResult(success=False, error="Not connected")
 
+        # Auto-deny if the triggering user isn't authorised to approve
+        # dangerous commands.  The denial is immediate so the agent thread
+        # doesn't block for the full timeout on an unresolvable prompt.
+        _source_uid = (metadata or {}).get("source_user_id", "")
+        if _source_uid and self._approval_allowed_user_ids:
+            _source_uid_clean = _clean_discord_id(_source_uid)
+            if _source_uid_clean not in self._approval_allowed_user_ids:
+                from tools.approval import _gateway_queues
+                from tools.approval import _lock as _approval_lock
+                with _approval_lock:
+                    _queue = _gateway_queues.get(session_key, [])
+                    for _entry in _queue:
+                        _entry.result = "denied_by_auth"
+                        _entry.event.set()
+                    _gateway_queues.pop(session_key, None)
+                try:
+                    target_id = chat_id
+                    if metadata and metadata.get("thread_id"):
+                        target_id = metadata["thread_id"]
+                    channel = self._client.get_channel(int(target_id))
+                    if not channel:
+                        channel = await self._client.fetch_channel(int(target_id))
+                    await channel.send(
+                        "That action requires admin approval — only authorised "
+                        "users can approve dangerous commands. It's been denied "
+                        "automatically. Try a safer approach instead~"
+                    )
+                except Exception:
+                    pass
+                return SendResult(success=True, message_id="auto_denied")
         try:
             # Resolve channel — use thread_id from metadata if present
             target_id = chat_id
@@ -4096,7 +4143,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
             view = ExecApprovalView(
                 session_key=session_key,
-                allowed_user_ids=self._allowed_user_ids,
+                allowed_user_ids=self._approval_allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
             )
 

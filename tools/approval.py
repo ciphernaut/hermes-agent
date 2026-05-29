@@ -99,6 +99,16 @@ def _get_session_platform() -> str:
         return os.getenv("HERMES_SESSION_PLATFORM", "") or ""
 
 
+def _get_session_env_for_approval() -> str:
+    """Return the user ID of the user who triggered this approval request,
+    if available from the session context."""
+    try:
+        from gateway.session_context import get_session_env
+        return get_session_env("HERMES_SESSION_USER_ID", "") or ""
+    except Exception:
+        return os.getenv("HERMES_SESSION_USER_ID", "") or ""
+
+
 def _is_gateway_approval_context() -> bool:
     """True when this call is inside a gateway/API session.
 
@@ -1316,6 +1326,10 @@ def check_all_command_guards(command: str, env_type: str,
                 "pattern_key": primary_key,
                 "pattern_keys": all_keys,
                 "description": combined_desc,
+                "source_user_id": (
+                    _get_session_env_for_approval()
+                    if is_gateway else ""
+                ),
             }
             decision = _await_gateway_decision(
                 session_key, notify_cb, approval_data, surface="gateway"
@@ -1336,6 +1350,25 @@ def check_all_command_guards(command: str, env_type: str,
                 # that names the agent's most common evasion paths (retry,
                 # rephrase, achieve the same outcome via a different command).
                 # See issue #24912 for the original incident.
+                if choice == "denied_by_auth":
+                    # Auto-denied because the triggering user isn't in the
+                    # approval allowlist.  Softer message: encourage the agent
+                    # to try a safer approach instead of hard-blocking.
+                    outcome = "denied_by_auth"
+                    return {
+                        "approved": False,
+                        "message": (
+                            f"BLOCKED: Command denied because you don't have "
+                            f"authorisation to approve dangerous commands. The "
+                            f"user who triggered this can't approve it. Consider "
+                            f"whether a safer approach exists and try that instead. "
+                            f"Do NOT retry this exact command."
+                        ),
+                        "pattern_key": primary_key,
+                        "description": combined_desc,
+                        "outcome": outcome,
+                        "user_consent": False,
+                    }
                 if not resolved:
                     reason = "timed out without user response"
                     timeout_addendum = " Silence is not consent."
