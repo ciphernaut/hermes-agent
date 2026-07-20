@@ -349,6 +349,9 @@ def _is_backend_available(backend: str) -> bool:
             return has_xai_credentials()
         except Exception:
             return False
+    if backend == "jina-ai":
+        # r.jina.ai is a public, no-key URL-to-Markdown proxy. Always available.
+        return True
     return False
 
 
@@ -865,6 +868,13 @@ async def web_extract_tool(
             # inline (the policy gate, SSRF re-check, etc. live inside the
             # provider itself for the firecrawl per-URL loop).
             _ensure_web_plugins_loaded()
+            # Force rediscovery so newly-added user plugins (e.g. jina-ai)
+            # become visible mid-session without requiring a full restart.
+            try:
+                from hermes_cli.plugins import _ensure_plugins_discovered
+                _ensure_plugins_discovered(force=True)
+            except Exception:
+                pass
             from agent.web_search_registry import (
                 get_active_extract_provider,
                 get_provider as _wsp_get_provider,
